@@ -123,12 +123,28 @@ type attestedCredentialData struct {
 
 type authDataFlags uint8
 
+// Authenticator data flag bits, per the CTAP2 spec (Table 1) / WebAuthn L2
+// §6.1: bit 0 = UP, bit 2 = UV, bit 6 = AT (attested credential data present),
+// bit 7 = ED (extension data present). Note: bit 5 (0x20) is RFU2/reserved and
+// must NOT be set for AT -- clients (Chromium device/fido, Firefox
+// authenticator-rs, webauthn.dll) test 0x40 for AT, so emitting 0x20 instead
+// makes the browser skip the attested credential data and produce an empty
+// credential ID.
 const (
 	authDataFlagUserPresent           authDataFlags = 0b00000001
 	authDataFlagUserVerified          authDataFlags = 0b00000100
 	authDataFlagAttestedDataIncluded  authDataFlags = 0b01000000
 	authDataFlagExtensionDataIncluded authDataFlags = 0b10000000
 )
+
+// NOTE: ES256 signatures in WebAuthn/CTAP2 are ASN.1 DER-encoded ECDSA
+// signatures -- for both the "packed" attestation statement (MakeCredential)
+// and the assertion signature (GetAssertion). RFC 9053 §8.1 defines the COSE
+// ECDSA algorithms over the DER encoding, and relying-party verifiers
+// (go-webauthn, @simplewebauthn/server, webauthn.dll) parse the signature as
+// ASN.1 (WebAuthn L2 §6.5.6 "Signature Attestation Types"). The raw r||s form
+// is NOT a WebAuthn/CTAP2 encoding and is rejected, so always use
+// SupportedCOSEPrivateKey.Sign (DER), never SignRaw, for protocol signatures.
 
 type authData struct {
 	RelyingPartyIDHash     []byte
@@ -219,13 +235,21 @@ func (server *CTAPServer) handleMakeCredential(data []byte) []byte {
 	}
 
 	if server.client.SupportsPIN() {
+		// The PIN is only required when this operation actually needs user
+		// verification: when the client requests it (options.uv) or when a
+		// resident (discoverable) key is being created (options.rk). For
+		// ordinary non-resident, presence-only requests the PIN must NOT be
+		// required even if one is configured - otherwise relying parties that
+		// don't do the PIN flow (e.g. the Yubico demo with userVerification
+		// "discouraged") fail with an error instead of registering the key.
+		requiresUV := args.Options != nil && (args.Options.UserVerification || args.Options.ResidentKey)
 		if args.PINUVAuthProtocol == 1 && args.PINUVAuthParam != nil {
 			pinAuth := server.derivePINAuth(server.client.PINToken(), args.ClientDataHash)
 			if !bytes.Equal(pinAuth, args.PINUVAuthParam) {
 				return []byte{byte(ctap2ErrPINAuthInvalid)}
 			}
 			flags = flags | authDataFlagUserVerified
-		} else if args.PINUVAuthParam == nil && server.client.PINHash() != nil {
+		} else if args.PINUVAuthParam == nil && server.client.PINHash() != nil && requiresUV {
 			return []byte{byte(ctap2ErrPINRequired)}
 		} else if args.PINUVAuthParam != nil && args.PINUVAuthProtocol != 1 {
 			return []byte{byte(ctap2ErrPINAuthInvalid)}
@@ -247,6 +271,8 @@ func (server *CTAPServer) handleMakeCredential(data []byte) []byte {
 	authenticatorData := makeAuthData(args.RP.ID, credentialSource, attestedCredentialData, flags)
 
 	attestationCert := server.client.CreateAttestationCertificiate(credentialSource.PrivateKey)
+	// The packed attestation signature is an ASN.1 DER-encoded ECDSA signature
+	// (RFC 9053 §8.1 / WebAuthn L2 §6.5.6); verifiers reject the raw r||s form.
 	attestationSignature := credentialSource.PrivateKey.Sign(append(authenticatorData, args.ClientDataHash...))
 	attestationStatement := basicAttestationStatement{
 		Alg: cose.COSE_ALGORITHM_ID_ES256,
@@ -318,8 +344,11 @@ type getAssertionResponse struct {
 	Credential        *webauthn.PublicKeyCredentialDescriptor `cbor:"1,keyasint,omitempty"`
 	AuthenticatorData []byte                                  `cbor:"2,keyasint"`
 	Signature         []byte                                  `cbor:"3,keyasint"`
-	//User                *PublicKeyCrendentialUserEntity `cbor:"4,keyasint,omitempty"`
-	//NumberOfCredentials int32 `cbor:"5,keyasint"`
+	// The user entity MUST be returned for resident-key (discoverable
+	// credential) assertions (i.e. when the allow list is empty) so the
+	// relying party can identify which account is being authenticated.
+	User                *webauthn.PublicKeyCrendentialUserEntity `cbor:"4,keyasint,omitempty"`
+	NumberOfCredentials uint32                                   `cbor:"5,keyasint,omitempty"`
 }
 
 func (server *CTAPServer) handleGetAssertion(data []byte) []byte {
@@ -361,15 +390,16 @@ func (server *CTAPServer) handleGetAssertion(data []byte) []byte {
 	}
 
 	authData := makeAuthData(args.RPID, credentialSource, nil, flags)
+	// Assertion signatures are ASN.1 DER-encoded ECDSA signatures as well.
 	signature := credentialSource.PrivateKey.Sign(util.Concat(authData, args.ClientDataHash))
 
 	credentialDescriptor := credentialSource.CTAPDescriptor()
 	response := getAssertionResponse{
-		Credential:        &credentialDescriptor,
-		AuthenticatorData: authData,
-		Signature:         signature,
-		//User:                credentialSource.User,
-		//NumberOfCredentials: 1,
+		Credential:          &credentialDescriptor,
+		AuthenticatorData:   authData,
+		Signature:           signature,
+		User:                credentialSource.User,
+		NumberOfCredentials: 1,
 	}
 
 	ctapLogger.Printf("GET ASSERTION RESPONSE: %#v\n\n", response)
