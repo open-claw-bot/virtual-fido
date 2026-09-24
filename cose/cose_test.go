@@ -7,6 +7,8 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"testing"
+
+	"github.com/bulwarkid/virtual-fido/crypto"
 )
 
 func checkErr(t *testing.T, err error) {
@@ -34,6 +36,20 @@ func TestECDSA(t *testing.T) {
 	checkErr(t, err)
 	cosePrivateKey := &SupportedCOSEPrivateKey{ECDSA: privateKey}
 	testCOSEKey(t, cosePrivateKey)
+}
+
+func TestECDSASignRaw(t *testing.T) {
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	checkErr(t, err)
+	cosePrivateKey := &SupportedCOSEPrivateKey{ECDSA: privateKey}
+	data := []byte("test")
+	rawSignature := cosePrivateKey.SignRaw(data)
+	if len(rawSignature) != 64 {
+		t.Fatalf("Raw ECDSA signature should be 64 bytes, got %d", len(rawSignature))
+	}
+	if !crypto.VerifyECDSARaw(&privateKey.PublicKey, data, rawSignature) {
+		t.Fatalf("Raw signature not verified: %#v", rawSignature)
+	}
 }
 
 func TestEd25519(t *testing.T) {

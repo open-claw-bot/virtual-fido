@@ -82,16 +82,55 @@ func Decrypt(key []byte, data []byte, nonce []byte) ([]byte, error) {
 	return decryptedData, nil
 }
 
-func SignECDSA(key *ecdsa.PrivateKey, data []byte) []byte {
+// SignECDSADER signs data using ECDSA and returns a DER-encoded (ASN.1)
+// signature, as produced by ecdsa.SignASN1. DER is the encoding required for
+// ECDSA signatures by both FIDO U2F (CTAP1) and WebAuthn/CTAP2 (FIDO2, see
+// WebAuthn L2 §6.5.6 "Signature Attestation Types" and RFC 9053 §8.1).
+func SignECDSADER(key *ecdsa.PrivateKey, data []byte) []byte {
 	hash := sha256.Sum256(data)
 	signature, err := ecdsa.SignASN1(rand.Reader, key, hash[:])
 	util.CheckErr(err, "Could not sign data")
 	return signature
 }
 
-func VerifyECDSA(key *ecdsa.PublicKey, data []byte, signature []byte) bool {
+// SignECDSARaw signs data using ECDSA and returns the raw r||s signature.
+// Each of r and s is encoded as a fixed-size big-endian integer padded to
+// the key size (32 bytes each for P-256), for a total of 64 bytes.
+//
+// NOTE: raw r||s is NOT the encoding WebAuthn/CTAP2 or FIDO U2F require.
+// Both require an ASN.1 DER-encoded ECDSA signature (RFC 9053 §8.1); relying
+// party verifiers reject this form. Use SignECDSADER for protocol signatures.
+func SignECDSARaw(key *ecdsa.PrivateKey, data []byte) []byte {
+	hash := sha256.Sum256(data)
+	r, s, err := ecdsa.Sign(rand.Reader, key, hash[:])
+	util.CheckErr(err, "Could not sign data")
+	keyBytes := (key.Curve.Params().BitSize + 7) / 8
+	signature := make([]byte, 2*keyBytes)
+	r.FillBytes(signature[:keyBytes])
+	s.FillBytes(signature[keyBytes:])
+	return signature
+}
+
+// VerifyECDSADER verifies a DER-encoded ECDSA signature (as produced by
+// SignECDSADER). This is the format used by both FIDO U2F (CTAP1) and
+// WebAuthn/CTAP2 (FIDO2).
+func VerifyECDSADER(key *ecdsa.PublicKey, data []byte, signature []byte) bool {
 	hash := sha256.Sum256(data)
 	return ecdsa.VerifyASN1(key, hash[:], signature)
+}
+
+// VerifyECDSARaw verifies a raw r||s ECDSA signature (as produced by
+// SignECDSARaw). This is not a protocol encoding: WebAuthn/CTAP2 and FIDO U2F
+// both use DER, so use VerifyECDSADER for those.
+func VerifyECDSARaw(key *ecdsa.PublicKey, data []byte, signature []byte) bool {
+	hash := sha256.Sum256(data)
+	keyBytes := (key.Curve.Params().BitSize + 7) / 8
+	if len(signature) != 2*keyBytes {
+		return false
+	}
+	r := new(big.Int).SetBytes(signature[:keyBytes])
+	s := new(big.Int).SetBytes(signature[keyBytes:])
+	return ecdsa.Verify(key, hash[:], r, s)
 }
 
 func SignEd25519(key *ed25519.PrivateKey, data []byte) []byte {

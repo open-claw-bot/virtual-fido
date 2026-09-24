@@ -26,9 +26,20 @@ func TestEncryptDecrypt(t *testing.T) {
 func TestSignVerifyECDSA(t *testing.T) {
 	data := []byte("data")
 	key := GenerateECDSAKey()
-	signature := SignECDSA(key, data)
-	if !VerifyECDSA(&key.PublicKey, data, signature) {
+
+	// DER encoding (required by FIDO U2F/CTAP1 and WebAuthn/CTAP2)
+	signature := SignECDSADER(key, data)
+	if !VerifyECDSADER(&key.PublicKey, data, signature) {
 		t.Fatalf("Signature not correct: %#v", signature)
+	}
+
+	// Raw r||s encoding (not a WebAuthn/CTAP2 encoding)
+	rawSignature := SignECDSARaw(key, data)
+	if len(rawSignature) != 64 {
+		t.Fatalf("Raw signature should be 64 bytes for P-256, got %d", len(rawSignature))
+	}
+	if !VerifyECDSARaw(&key.PublicKey, data, rawSignature) {
+		t.Fatalf("Raw signature not correct: %#v", rawSignature)
 	}
 }
 

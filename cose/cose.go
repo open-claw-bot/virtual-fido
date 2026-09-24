@@ -87,7 +87,25 @@ func (key *SupportedCOSEPrivateKey) Public() *SupportedCOSEPublicKey {
 
 func (key *SupportedCOSEPrivateKey) Sign(data []byte) []byte {
 	if key.ECDSA != nil {
-		return crypto.SignECDSA(key.ECDSA, data)
+		// Sign() produces a DER-encoded ECDSA signature, as required by both
+		// FIDO U2F (CTAP1) and WebAuthn/CTAP2 (FIDO2).
+		return crypto.SignECDSADER(key.ECDSA, data)
+	} else if key.Ed25519 != nil {
+		return crypto.SignEd25519(key.Ed25519, data)
+	} else if key.RSA != nil {
+		return crypto.SignRSA(key.RSA, data)
+	} else {
+		panic("No supported private key data!")
+	}
+}
+
+// SignRaw signs data and returns the signature in the raw r||s encoding for
+// ECDSA. This is NOT the encoding WebAuthn/CTAP2 or FIDO U2F require (both
+// use ASN.1 DER); it exists only for non-conforming/legacy use. For Ed25519
+// and RSA there is no DER/raw distinction, so the result is identical to Sign.
+func (key *SupportedCOSEPrivateKey) SignRaw(data []byte) []byte {
+	if key.ECDSA != nil {
+		return crypto.SignECDSARaw(key.ECDSA, data)
 	} else if key.Ed25519 != nil {
 		return crypto.SignEd25519(key.Ed25519, data)
 	} else if key.RSA != nil {
@@ -129,7 +147,7 @@ func (key *SupportedCOSEPublicKey) Equal(otherKey *SupportedCOSEPublicKey) bool 
 
 func (key *SupportedCOSEPublicKey) Verify(data []byte, signature []byte) bool {
 	if key.ECDSA != nil {
-		return crypto.VerifyECDSA(key.ECDSA, data, signature)
+		return crypto.VerifyECDSADER(key.ECDSA, data, signature)
 	} else if key.Ed25519 != nil {
 		return crypto.VerifyEd25519(key.Ed25519, data, signature)
 	} else if key.RSA != nil {

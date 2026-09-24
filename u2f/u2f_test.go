@@ -157,7 +157,7 @@ func TestU2FRegistration(t *testing.T) {
 		t.Fatalf("Incorrect return code: %d", returnCode)
 	}
 	signatureBytes := util.Concat([]byte{0}, application, challenge, keyHandle, encodedPublicKey)
-	if !crypto.VerifyECDSA(publicKey, signatureBytes, signature) {
+	if !crypto.VerifyECDSADER(publicKey, signatureBytes, signature) {
 		t.Fatalf("Could not verify signature returned by Authenticate")
 	}
 }
