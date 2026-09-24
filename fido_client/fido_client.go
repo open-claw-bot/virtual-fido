@@ -282,3 +282,14 @@ func (client *DefaultFIDOClient) DeleteIdentity(id []byte) bool {
 	}
 	return success
 }
+
+// DeleteIdentities removes every credential in ids and persists the vault once,
+// so that deleting many credentials does not rewrite the file repeatedly. It
+// returns the number of credentials that were actually removed.
+func (client *DefaultFIDOClient) DeleteIdentities(ids [][]byte) int {
+	deleted := client.vault.DeleteIdentities(ids)
+	if deleted > 0 {
+		client.saveData()
+	}
+	return deleted
+}

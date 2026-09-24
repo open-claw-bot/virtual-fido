@@ -67,6 +67,20 @@ func (vault *IdentityVault) DeleteIdentity(id []byte) bool {
 	return false
 }
 
+// DeleteIdentities removes every credential whose ID is in ids and returns the
+// number of credentials that were actually removed. Deleting by ID (rather
+// than by index) keeps this correct even though DeleteIdentity reorders the
+// remaining credentials.
+func (vault *IdentityVault) DeleteIdentities(ids [][]byte) int {
+	deleted := 0
+	for _, id := range ids {
+		if vault.DeleteIdentity(id) {
+			deleted++
+		}
+	}
+	return deleted
+}
+
 func (vault *IdentityVault) GetMatchingCredentialSources(relyingPartyID string, allowList []webauthn.PublicKeyCredentialDescriptor) []*CredentialSource {
 	sources := make([]*CredentialSource, 0)
 	for _, credentialSource := range vault.CredentialSources {
@@ -104,7 +118,8 @@ func (vault *IdentityVault) Export() []SavedCredentialSource {
 }
 
 func (vault *IdentityVault) Import(sources []SavedCredentialSource) error {
-	for _, source := range sources {
+	for i := range sources {
+		source := sources[i]
 		key, err := cose.UnmarshalCOSEPrivateKey(source.PrivateKey)
 		if err != nil {
 			oldFormatKey, err := x509.ParseECPrivateKey(source.PrivateKey)
@@ -113,12 +128,18 @@ func (vault *IdentityVault) Import(sources []SavedCredentialSource) error {
 			}
 			key = &cose.SupportedCOSEPrivateKey{ECDSA: oldFormatKey}
 		}
+		// Copy the relying party and user out of the (shared) loop variable.
+		// Taking &source.RelyingParty directly would make every imported
+		// credential point at the LAST credential's data, silently rewriting
+		// all existing keys.
+		relyingParty := source.RelyingParty
+		user := source.User
 		decodedSource := CredentialSource{
 			Type:             source.Type,
 			ID:               source.ID,
 			PrivateKey:       key,
-			RelyingParty:     &source.RelyingParty,
-			User:             &source.User,
+			RelyingParty:     &relyingParty,
+			User:             &user,
 			SignatureCounter: source.SignatureCounter,
 		}
 		vault.AddIdentity(&decodedSource)
