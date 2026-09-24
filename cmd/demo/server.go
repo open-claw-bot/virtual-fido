@@ -5,8 +5,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
+	"os/signal"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	virtual_fido "github.com/bulwarkid/virtual-fido"
@@ -50,10 +53,16 @@ func (support *ClientSupport) ApproveClientAction(action fido_client.ClientActio
 }
 
 func (support *ClientSupport) SaveData(data []byte) {
-	f, err := os.OpenFile(support.vaultFilename, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0755)
-	checkErr(err, "Could not open vault file")
+	// Write atomically: write to a temporary file, then rename.
+	// This prevents vault corruption if the process is killed mid-write.
+	tmpFilename := support.vaultFilename + ".tmp"
+	f, err := os.OpenFile(tmpFilename, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0600)
+	checkErr(err, "Could not open vault temp file")
 	_, err = f.Write(data)
+	f.Close()
 	checkErr(err, "Could not write vault data")
+	err = os.Rename(tmpFilename, support.vaultFilename)
+	checkErr(err, "Could not finalize vault write")
 }
 
 func (support *ClientSupport) RetrieveData() []byte {
@@ -72,25 +81,64 @@ func (support *ClientSupport) Passphrase() string {
 }
 
 func runServer(client virtual_fido.FIDOClient) {
+	// Handle Ctrl+C (SIGINT) and SIGTERM for graceful shutdown
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+	// Start the virtual FIDO server first so it's listening before the
+	// usbip.exe client tries to connect.
 	wg := &sync.WaitGroup{}
-	wg.Add(2)
+	wg.Add(1)
 	go func() {
 		virtual_fido.Start(client)
 		wg.Done()
 	}()
-	go func() {
-		time.Sleep(500 * time.Millisecond)
-		prog := platformUSBIPExec()
-		if prog != nil {
-			prog.Stdin = os.Stdin
-			prog.Stdout = os.Stdout
-			prog.Stderr = os.Stderr
-			err := prog.Run()
-			if err != nil {
-				fmt.Printf("Error: %s\n", err)
-			}
+
+	// Start the usbip.exe child process (if any) with Start/Wait
+	// so we can kill it on shutdown. Sleep first to let the server bind.
+	time.Sleep(500 * time.Millisecond)
+	var usbipCmd *exec.Cmd
+	prog := platformUSBIPExec()
+	if prog != nil {
+		prog.Stdin = os.Stdin
+		prog.Stdout = os.Stdout
+		prog.Stderr = os.Stderr
+		err := prog.Start()
+		if err != nil {
+			fmt.Printf("Error starting USBIP: %s\n", err)
+		} else {
+			usbipCmd = prog
 		}
-		wg.Done()
-	}()
+	}
+	if usbipCmd != nil {
+		wg.Add(1)
+		go func() {
+			_ = usbipCmd.Wait()
+			wg.Done()
+		}()
+	}
+
+	// Wait for either a signal or both goroutines to finish
+	select {
+	case sig := <-sigChan:
+		fmt.Printf("\nReceived %v, shutting down gracefully...\n", sig)
+		if usbipCmd != nil && usbipCmd.Process != nil {
+			usbipCmd.Process.Kill()
+		}
+		virtual_fido.Stop()
+	case <-waitAll(wg):
+	}
+
 	wg.Wait()
+	signal.Stop(sigChan)
+}
+
+// waitAll returns a channel that closes when all WaitGroup items are done.
+func waitAll(wg *sync.WaitGroup) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	return done
 }

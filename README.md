@@ -22,7 +22,14 @@ Go to the [YubiKey test page](https://demo.yubico.com/webauthn-technical/registr
 
 ### Windows
 
-Run `go run ./cmd/demo start` to attach the USB device. Run `go run ./cmd/demo --help` to see more commands, such as to list or delete credentials from the file.
+1. Install the [usbip-win2](https://github.com/vadimgrn/usbip-win2) USB/IP client. Its UDE driver (`usbip2_ude.sys`) is WHLK-signed, so it works on Windows 10/11 without enabling test signing (`bcdedit /set TESTSIGNING ON` is not required). The demo automatically uses the `usbip.exe` it installs at `C:\Program Files\USBip\usbip.exe`.
+   - If `usbip.exe` is installed somewhere else, point the demo at it with the `USBIP_EXE` environment variable, e.g. `$env:USBIP_EXE = "C:\path\to\usbip.exe"`.
+   - The demo only falls back to the legacy `usbip.exe` bundled in `cmd/demo/usbip/bin` if no usbip-win2 install is found. That legacy binary requires the old [cezanne/usbip-win](https://github.com/cezanne/usbip-win) driver and test signing, and is not recommended.
+2. Open an **Administrator** terminal (attaching a virtual USB device requires elevation).
+3. Run `go run ./cmd/demo start` to attach the USB device. Run `go run ./cmd/demo --help` to see more commands, such as to list or delete credentials from the file.
+
+You can sanity-check the driver separately while the server is running:
+`"C:\Program Files\USBip\usbip.exe" list -r 127.0.0.1` should show the `2-2` device, and `"C:\Program Files\USBip\usbip.exe" attach -r 127.0.0.1 -b 2-2` should print `succesfully attached to port N`.
 
 ### Linux
 
