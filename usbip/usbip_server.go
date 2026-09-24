@@ -13,7 +13,11 @@ var usbipLogger = util.NewLogger("[USBIP] ", util.LogLevelTrace)
 var errLogger = util.NewLogger("[ERR] ", util.LogLevelEnabled)
 
 type USBIPServer struct {
-	devices []USBIPDevice
+	devices     []USBIPDevice
+	listener    net.Listener
+	stopChan    chan struct{}
+	connections []net.Conn
+	connMutex   sync.Mutex
 }
 
 func NewUSBIPServer(devices []USBIPDevice) *USBIPServer {
@@ -24,11 +28,23 @@ func NewUSBIPServer(devices []USBIPDevice) *USBIPServer {
 
 func (server *USBIPServer) Start() {
 	usbipLogger.Println("Starting USBIP server...")
-	listener, err := net.Listen("tcp", ":3240")
+	server.stopChan = make(chan struct{})
+	listener, err := net.Listen("tcp", "127.0.0.1:3240")
 	util.CheckErr(err, "Could not create listener")
+	server.listener = listener
 	for {
+		select {
+		case <-server.stopChan:
+			return
+		default:
+		}
 		connection, err := listener.Accept()
 		if err != nil {
+			select {
+			case <-server.stopChan:
+				return
+			default:
+			}
 			usbipLogger.Printf("Connection accept error: %v", err)
 			continue
 		}
@@ -37,13 +53,63 @@ func (server *USBIPServer) Start() {
 			connection.Close()
 			continue
 		}
+		server.trackConnection(connection)
 		usbipConn := newUSBIPConnection(server, connection)
 		util.Try(func() {
 			usbipConn.handle()
 		}, func(err interface{}) {
-			errLogger.Printf("%v", err)
+			logPanicUnlessShutdown(err)
 		})
+		server.untrackConnection(connection)
+		connection.Close()
 	}
+}
+
+func (server *USBIPServer) Stop() {
+	select {
+	case <-server.stopChan:
+		// already stopped
+		return
+	default:
+	}
+	close(server.stopChan)
+	if server.listener != nil {
+		server.listener.Close()
+	}
+	// Close all active connections to unblock any in-progress handles
+	server.connMutex.Lock()
+	for _, conn := range server.connections {
+		conn.Close()
+	}
+	server.connections = nil
+	server.connMutex.Unlock()
+}
+
+func (server *USBIPServer) trackConnection(conn net.Conn) {
+	server.connMutex.Lock()
+	server.connections = append(server.connections, conn)
+	server.connMutex.Unlock()
+}
+
+func (server *USBIPServer) untrackConnection(conn net.Conn) {
+	server.connMutex.Lock()
+	for i, c := range server.connections {
+		if c == conn {
+			server.connections[i] = server.connections[len(server.connections)-1]
+			server.connections = server.connections[:len(server.connections)-1]
+			break
+		}
+	}
+	server.connMutex.Unlock()
+}
+
+func logPanicUnlessShutdown(err interface{}) {
+	// Suppress noisy stack traces when the connection is deliberately
+	// closed during server shutdown.
+	if s, ok := err.(string); ok && strings.Contains(s, "use of closed network connection") {
+		return
+	}
+	errLogger.Printf("%v", err)
 }
 
 func (server *USBIPServer) getDevice(busID string) USBIPDevice {
@@ -73,7 +139,19 @@ func newUSBIPConnection(server *USBIPServer, conn net.Conn) *usbipConnection {
 
 func (conn *usbipConnection) handle() {
 	for {
-		header := util.ReadBE[usbipControlHeader](conn.conn)
+		// Stop handling this connection once the client disconnects or a
+		// protocol error occurs, instead of spinning on read errors.
+		var header usbipControlHeader
+		shouldContinue := true
+		util.Try(func() {
+			header = util.ReadBE[usbipControlHeader](conn.conn)
+		}, func(err interface{}) {
+			logPanicUnlessShutdown(err)
+			shouldContinue = false
+		})
+		if !shouldContinue {
+			return
+		}
 		usbipLogger.Printf("[CONTROL MESSAGE] %#v\n\n", header)
 		if header.Command == usbipCommandOpReqDevlist {
 			reply := newOpRepDevlist(conn.server.devices)
@@ -101,6 +179,10 @@ func (conn *usbipConnection) handle() {
 
 func (conn *usbipConnection) handleCommands(device USBIPDevice) {
 	for {
+		// A read failure means the client disconnected or the connection is
+		// broken. Log it once and stop handling this connection, otherwise we
+		// would spin here forever printing the same error.
+		shouldContinue := true
 		util.Try(func() {
 			header := util.ReadBE[usbipMessageHeader](conn.conn)
 			usbipLogger.Printf("[MESSAGE HEADER] %s\n\n", header)
@@ -112,8 +194,12 @@ func (conn *usbipConnection) handleCommands(device USBIPDevice) {
 				usbipLogger.Printf("Unsupported Command: %#v\n\n", header)
 			}
 		}, func(err interface{}) {
-			errLogger.Printf("%v", err)
+			logPanicUnlessShutdown(err)
+			shouldContinue = false
 		})
+		if !shouldContinue {
+			return
+		}
 	}
 }
 

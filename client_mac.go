@@ -18,3 +18,7 @@ func startClient(client FIDOClient) {
 	ctapHIDServer := ctap_hid.NewCTAPHIDServer(ctapServer, u2fServer)
 	mac.Start(ctapHIDServer)
 }
+
+func stopClient() {
+	// Mac driver stop is not yet implemented
+}

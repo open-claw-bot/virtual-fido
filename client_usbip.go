@@ -10,11 +10,19 @@ import (
 	"github.com/bulwarkid/virtual-fido/usbip"
 )
 
+var usbipServer *usbip.USBIPServer
+
 func startClient(client FIDOClient) {
 	ctapServer := ctap.NewCTAPServer(client)
 	u2fServer := u2f.NewU2FServer(client)
 	ctapHIDServer := ctap_hid.NewCTAPHIDServer(ctapServer, u2fServer)
 	usbDevice := usb.NewUSBDevice(ctapHIDServer)
-	server := usbip.NewUSBIPServer([]usbip.USBIPDevice{usbDevice})
-	server.Start()
+	usbipServer = usbip.NewUSBIPServer([]usbip.USBIPDevice{usbDevice})
+	usbipServer.Start()
+}
+
+func stopClient() {
+	if usbipServer != nil {
+		usbipServer.Stop()
+	}
 }

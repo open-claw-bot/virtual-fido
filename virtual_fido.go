@@ -18,6 +18,10 @@ func Start(client FIDOClient) {
 	startClient(client)
 }
 
+func Stop() {
+	stopClient()
+}
+
 func SetLogLevel(level util.LogLevel) {
 	util.SetLogLevel(level)
 }

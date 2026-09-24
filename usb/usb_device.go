@@ -11,6 +11,23 @@ import (
 
 var usbLogger = util.NewLogger("[USB] ", util.LogLevelTrace)
 
+// requestTimeoutMs is how long the device will leave a host read request
+// (endpoint 1 / IN) pending before completing it empty.
+//
+// FIDO operations require real user interaction: the user must enter a PIN in
+// the browser and then approve on the "device" (the demo's terminal prompt),
+// which routinely takes many seconds while switching windows. A short timeout
+// here causes the host's pending read to be completed with an empty/garbage
+// report whenever the user takes longer than the timeout to approve, which
+// corrupts the CTAPHID stream and makes relying parties (e.g. GitHub) fail with
+// NotAllowedError or re-prompt for the PIN.
+//
+// The CTAPHID keepalive mechanism (CTAPHID_STATUS_UPNEEDED sent every 50ms
+// while a command is being processed) keeps the host's read requests flowing
+// during these waits, so this timeout only needs to be a safety net for
+// requests that are truly abandoned.
+const requestTimeoutMs = 60_000
+
 type USBDeviceDelegate interface {
 	HandleMessage(transferBuffer []byte)
 	SetResponseHandler(handler func(response []byte))
@@ -76,7 +93,7 @@ func (device *USBDevice) HandleMessage(id uint32, onFinish func(response []byte)
 		onFinish(reply)
 	case usbEndpointOutput:
 		device.requestBuffer.Request(id, onFinish)
-		util.SetTimeout(1000, func() {
+		util.SetTimeout(requestTimeoutMs, func() {
 			// If the request hasn't finished yet, cancel it and return nil
 			if device.requestBuffer.CancelRequest(id) {
 				onFinish(nil)
